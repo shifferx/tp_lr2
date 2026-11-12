@@ -1,0 +1,104 @@
+--- server.py	2026-11-12 13:45:00.000000000 +0300
++++ server_fixed.py	2026-11-12 13:50:00.000000000 +0300
+@@ -57,9 +57,8 @@
+         products_html = ""
+         for p in products:
+             p_id, name, price, stock = p
+-            # УЯЗВИМОСТЬ №2: Цена передается прямо в ссылке (URL)
+             products_html += f"""
+             <div style="border: 1px solid #ccc; padding: 15px; margin-bottom: 10px;">
+                 <h2>{name}</h2>
+                 <p>Цена: {price} ₽</p>
+                 <p>В наличии: {stock} шт.</p>
+-                <a href="/pay?product_id={p_id}&price={price}">
++                <a href="/pay?product_id={p_id}">
+                     <button>Перейти к оформлению</button>
+                 </a>
+             </div>
+@@ -80,10 +79,19 @@
+     # 2. СТРАНИЦА ОПЛАТЫ
+     elif method == 'GET' and path_only == "/pay":
+         try:
+-            p_id = query_params["product_id"][0]
+-            price = query_params["price"][0]
++            p_id = int(query_params["product_id"][0])
+         except (KeyError, IndexError, ValueError):
+             status = "400 Bad Request"
+             body = b"Invalid parameters"
+             client.sendall(f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+             client.close()
+             continue
+ 
++        # ИСПРАВЛЕНИЕ №2: Берем актуальную цену строго из базы данных по ID
++        conn = sqlite3.connect("shop.db")
++        cursor = conn.cursor()
++        cursor.execute("SELECT price FROM products WHERE id = ?", (p_id,))
++        row = cursor.fetchone()
++        conn.close()
++        if not row:
++            status = "404 Not Found"
++            body = b"Product not found"
++            client.sendall(f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
++            client.close()
++            continue
++        price = row[0]
++
+         status = "200 OK"
+         body = f"""
+         <!doctype html>
+@@ -94,7 +102,6 @@
+             
+             <form method="post" action="/orders">
+                 <input type="hidden" name="product_id" value="{p_id}">
+-                <input type="hidden" name="price" value="{price}">
+                 
+                 <label>
+                     Количество:<br>
+@@ -114,32 +121,31 @@
+         fields = parse_qs(form_body.decode("utf-8"))
+ 
+         try:
+-            product_id_str = fields["product_id"][0]
+-            quantity_str = fields["quantity"][0]
+-            custom_price = int(fields["price"][0])
++            # ИСПРАВЛЕНИЕ №1: Приводим входные данные строго к целым числам
++            product_id = int(fields["product_id"][0])
++            quantity = int(fields["quantity"][0])
++            if product_id < 1 or quantity < 1:
++                raise ValueError("Некорректные значения")
+ 
+             conn = sqlite3.connect("shop.db")
+             cursor = conn.cursor()
+ 
+-            # УЯЗВИМОСТЬ №1: SQL-инъекция через небезопасную конкатенацию
+-            query = f"SELECT stock FROM products WHERE id = {product_id_str}"
+-            cursor.execute(query)
++            # ИСПРАВЛЕНИЕ №1 и №2: Параметризованный запрос и получение реальной цены из БД
++            cursor.execute("SELECT price, stock FROM products WHERE id = ?", (product_id,))
+             row = cursor.fetchone()
+ 
+             if not row:
+                 status = "400 Bad Request"
+                 body = "Товар не найден.".encode("utf-8")
+             else:
+-                stock = row[0]
+-                try:
+-                    q_val = int(quantity_str)
+-                except ValueError:
+-                    q_val = 999
+-
+-                total_cost = custom_price * q_val
++                real_price, stock = row
++                # ИСПРАВЛЕНИЕ №1: Строгая проверка остатка на складе
++                if quantity > stock:
++                    raise ValueError("На складе недостаточно товара!")
++
++                total_cost = real_price * quantity
+ 
+                 cursor.execute(
+                     "INSERT INTO orders (product_id, quantity, total_price) VALUES (?, ?, ?)",
+-                    (product_id_str, quantity_str, total_cost)
++                    (product_id, quantity, total_cost)
+                 )
+                 conn.commit()
+                 conn.close()
